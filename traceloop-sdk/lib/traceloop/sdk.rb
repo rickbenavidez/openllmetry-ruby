@@ -5,27 +5,32 @@ require 'opentelemetry-semantic_conventions_ai'
 module Traceloop
   module SDK
     class Traceloop
-      def initialize
+      def initialize(exporter=default_exporter)
         OpenTelemetry::SDK.configure do |c|
           c.add_span_processor(
-            OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(
-              OpenTelemetry::Exporter::OTLP::Exporter.new(
-                endpoint: "#{ENV.fetch("TRACELOOP_BASE_URL", "https://api.traceloop.com")}/v1/traces",
-                headers: { "Authorization" => "Bearer #{ENV.fetch("TRACELOOP_API_KEY")}" }
-              )
-            )
+            OpenTelemetry::SDK::Trace::Export::SimpleSpanProcessor.new(exporter)
           )
-          puts "Traceloop exporting traces to #{ENV.fetch("TRACELOOP_BASE", "https://api.traceloop.com")}"
         end
 
         @tracer = OpenTelemetry.tracer_provider.tracer("Traceloop")
-      end
 
+        def default_exporter
+          OpenTelemetry::Exporter::OTLP::Exporter.new(
+            endpoint: "#{ENV.fetch("TRACELOOP_BASE_URL", "https://api.traceloop.com")}/v1/traces",
+            headers: { "Authorization" => "Bearer #{ENV.fetch("TRACELOOP_API_KEY")}" }
+          )
+        end
+      end
+  
       class Tracer
         def initialize(span, provider, model)
           @span = span
           @provider = provider
           @model = model
+        end
+
+        def add_attribute(key, value)
+          @span.add_attributes({ key => value })
         end
 
         def log_messages(messages)
@@ -103,6 +108,22 @@ module Traceloop
           response.body.rewind()
         end
 
+        def log_chat_response(chat)
+         @span.add_attributes({
+            'langfuse.user.id' => chat.user_id,
+            OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_RESPONSE_MODEL => chat.model_id,
+          })
+          @span.add_attributes({
+            OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_USAGE_TOTAL_TOKENS => chat.input_tokens.to_i + chat.output_tokens.to_i,
+            OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_USAGE_COMPLETION_TOKENS => chat.output_tokens.to_i,
+            OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_USAGE_PROMPT_TOKENS => chat.input_tokens.to_i,
+          })
+          @span.add_attributes({
+            "#{OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_COMPLETIONS}.0.role" => 'assistant',
+            "#{OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_COMPLETIONS}.0.content" => chat.response
+          })
+        end
+
         def log_openai_response(response)
           @span.add_attributes({
             OpenTelemetry::SemanticConventionsAi::SpanAttributes::LLM_RESPONSE_MODEL => response.dig("model"),
@@ -135,6 +156,7 @@ module Traceloop
       def workflow(name)
         @tracer.in_span("#{name}.workflow") do |span|
           span.add_attributes({
+            'langfuse.trace.name' => "#{name}.workflow",
             OpenTelemetry::SemanticConventionsAi::SpanAttributes::TRACELOOP_SPAN_KIND => "workflow",
             OpenTelemetry::SemanticConventionsAi::SpanAttributes::TRACELOOP_ENTITY_NAME => name,
           })
